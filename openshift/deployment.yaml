@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vscode
+  labels:
+    app: vscode
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate            # RWO volume: never run two pods at once
+  selector:
+    matchLabels:
+      app: vscode
+  template:
+    metadata:
+      labels:
+        app: vscode
+    spec:
+      serviceAccountName: vscode
+      # No runAsUser/fsGroup: OpenShift assigns them (restricted-v2 SCC compatible)
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: code-server
+          image: ghcr.io/pavant2007/dev-suite:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: ssh
+              containerPort: 2222
+              protocol: TCP
+          env:
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vscode-auth
+                  key: password
+            - name: SSH_AUTHORIZED_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: vscode-auth
+                  key: ssh-authorized-keys
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vscode-auth
+                  key: anthropic-api-key
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vscode-auth
+                  key: openai-api-key
+                  optional: true
+            - name: MAVEN_OPTS
+              value: "-XX:MaxRAMPercentage=50"
+            - name: GRADLE_OPTS
+              value: "-XX:MaxRAMPercentage=50"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: home
+              mountPath: /home/coder
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: vscode-home

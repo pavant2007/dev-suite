@@ -1,0 +1,37 @@
+# Optional: Docker daemon sidecar so the Docker CLI in code-server works.
+# Requires: oc adm policy add-scc-to-user privileged -z vscode -n <namespace>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vscode
+spec:
+  template:
+    spec:
+      containers:
+        - name: code-server
+          env:
+            - name: DOCKER_HOST
+              value: tcp://localhost:2375
+        - name: dind
+          image: docker:29-dind
+          args: ["--host=tcp://127.0.0.1:2375", "--tls=false"]
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsNonRoot: false
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: docker-data
+              mountPath: /var/lib/docker
+      volumes:
+        - name: docker-data
+          emptyDir: {}

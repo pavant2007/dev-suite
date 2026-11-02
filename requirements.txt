@@ -1,0 +1,13 @@
+# Python libraries baked into the image (system site-packages).
+# Users can add more at runtime with `pip install` (goes to ~/.local on the PVC).
+fastapi[standard]
+uvicorn[standard]
+pydantic
+numpy
+pandas
+ta
+requests
+httpx
+python-dotenv
+pytest
+ruff

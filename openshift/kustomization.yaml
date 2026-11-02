@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - serviceaccount.yaml
+  - secret.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - route.yaml
+
+# Uncomment to run `docker build/run` inside the pod (needs the privileged SCC, see README)
+# patches:
+#   - path: dind-sidecar-patch.yaml

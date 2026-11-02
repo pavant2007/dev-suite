@@ -1,0 +1,19 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: vscode
+  labels:
+    app: vscode
+  annotations:
+    # Keep idle editor WebSockets alive
+    haproxy.router.openshift.io/timeout: 1h
+spec:
+  # host: vscode.apps.<cluster-domain>
+  to:
+    kind: Service
+    name: vscode
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
