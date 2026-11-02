@@ -51,12 +51,10 @@ openshift/
 
 You can trigger it by hand from Actions → build-image → Run workflow.
 
-**Pulling from OpenShift:** GHCR packages are private by default. Either make the package public (GitHub → Packages → dev-suite → Package settings → Change visibility), or add a pull secret:
+**Public image:** `ghcr.io/pavant2007/dev-suite` is public, so anyone can pull it without logging in, and OpenShift doesn't need a pull secret:
 
 ```bash
-oc create secret docker-registry ghcr-pull --docker-server=ghcr.io \
-  --docker-username=pavant2007 --docker-password=<PAT with read:packages> -n vscode
-oc secrets link vscode ghcr-pull --for=pull -n vscode
+docker pull ghcr.io/pavant2007/dev-suite:latest
 ```
 
 Local build (slow on Apple Silicon because amd64 is emulated): `docker build --platform linux/amd64 -t dev-suite:local . && ci/smoke-test.sh dev-suite:local`
