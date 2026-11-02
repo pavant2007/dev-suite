@@ -5,7 +5,12 @@ set -euo pipefail
 IMAGE="${1:-dev-suite:test}"
 UID_GID="1000870000:0"
 TMP="$(mktemp -d)"
-trap 'docker rm -f vsc-smoke >/dev/null 2>&1 || true; rm -rf "$TMP"' EXIT
+cleanup() {
+  rc=$?
+  if [ "$rc" != 0 ]; then echo "--- container logs (failure) ---"; docker logs vsc-smoke 2>&1 | tail -40 || true; fi
+  docker rm -f vsc-smoke >/dev/null 2>&1 || true; rm -rf "$TMP"
+}
+trap cleanup EXIT
 
 docker image inspect "$IMAGE" --format '{{.Size}}' | awk '{printf "image size: %.2f GB\n", $1/1e9}'
 
@@ -22,7 +27,7 @@ git --version
 docker --version
 docker compose version
 docker buildx version | cut -d" " -f1-2
-echo "code-server $(code-server --version | head -1)"
+echo "code-server $(code-server --version 2>/dev/null | grep -m1 -E "^[0-9]+\.")"
 claude --version
 codex --version
 kubectl version --client | head -1

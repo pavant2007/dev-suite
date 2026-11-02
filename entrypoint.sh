@@ -1,9 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-# OpenShift assigns a random UID: register it so git/ssh/whoami work.
-if ! whoami &>/dev/null && [ -w /etc/passwd ]; then
-  echo "coder:x:$(id -u):0:coder:${HOME}:/bin/bash" >> /etc/passwd
+# OpenShift assigns a random UID: point the "coder" user at it so git/ssh/whoami work
+# (sshd resolves the login name, so the entry must carry the current UID).
+if [ "$(id -u)" != "$(id -u coder 2>/dev/null)" ] && [ -w /etc/passwd ]; then
+  sed "/^coder:/d" /etc/passwd > /tmp/passwd
+  echo "coder:x:$(id -u):0:coder:${HOME}:/bin/bash" >> /tmp/passwd
+  cat /tmp/passwd > /etc/passwd && rm -f /tmp/passwd
 fi
 
 # Seed baked-in extensions into HOME (which may be an empty PVC on first start).
