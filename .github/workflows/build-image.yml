@@ -19,6 +19,9 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  # Don't publish build records/summaries: they embed the push event (incl. commit author emails)
+  DOCKER_BUILD_SUMMARY: "false"
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
   build:
@@ -55,6 +58,8 @@ jobs:
           tags: dev-suite:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
 
       - name: Smoke test
         run: ci/smoke-test.sh dev-suite:test
@@ -77,3 +82,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
+          # Provenance would publish the GitHub event (incl. author emails) with the public image
+          provenance: false
+          sbom: false
