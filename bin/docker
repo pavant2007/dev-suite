@@ -13,8 +13,11 @@ case "${1:-}" in
   build)               shift;   exec ocp-build "$@" ;;
   buildx)              [ "${2:-}" = build ] && { shift 2; exec ocp-build "$@"; }
                                 exec "$REAL" "$@" ;;
-  images)                       exec oc -n "$NS" get imagestreamtags ;;
+  images|ls)                    exec oc -n "$NS" get imagestreamtags ;;
   image)               [[ "${2:-}" =~ ^(ls|list)$ ]] && exec oc -n "$NS" get imagestreamtags ;;
+  ps)                           exec oc -n "$NS" get pods -o wide ;;
+  container)           [[ "${2:-}" =~ ^(ls|list|ps)$ ]] && exec oc -n "$NS" get pods -o wide ;;
+  logs)                shift;   exec oc -n "$NS" logs "$@" ;;
   ""|-*|help|version|login|logout|context|completion|compose)
                                 exec "$REAL" "$@" ;;
 esac
@@ -23,6 +26,7 @@ cat >&2 <<EOF
 docker: no Docker daemon in this pod (OpenShift restricted SCC).
   docker build ...   -> works: builds with OpenShift Builds (ocp-build)
   docker images      -> works: lists ImageStreamTags in namespace ${NS:-<ns>}
+  docker ps / logs   -> works: lists pods / shows pod logs (oc get pods, oc logs)
   docker run/compose -> use OpenShift instead, e.g.:
       oc run NAME --image=image-registry.openshift-image-registry.svc:5000/${NS:-<ns>}/IMAGE:TAG
       oc new-app --image-stream=IMAGE:TAG --name=NAME

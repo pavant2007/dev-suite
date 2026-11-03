@@ -104,6 +104,7 @@ OpenShift's default `restricted-v2` policy can't run a Docker daemon, and neithe
 |---|---|
 | `docker build -t myapp:v1 .` | runs [`ocp-build`](bin/ocp-build): an OpenShift Docker-strategy build of the directory, pushed to `image-registry.openshift-image-registry.svc:5000/<ns>/myapp:v1` |
 | `docker images` | lists the namespace's ImageStreamTags |
+| `docker ps`, `docker logs POD` | `oc get pods`, `oc logs POD` |
 | `docker run …` | prints how to do it with OpenShift: `oc run NAME --image=…` or `oc new-app --image-stream=myapp:v1` |
 | anything else | real Docker CLI, used as-is whenever `DOCKER_HOST` is set or a daemon socket exists |
 

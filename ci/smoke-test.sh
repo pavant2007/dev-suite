@@ -42,7 +42,7 @@ echo "extensions: $(ls /opt/vscode-extensions | grep -v json | sed -E "s/-[0-9]+
 
 echo "--- code-server + sshd ---"
 ssh-keygen -q -t ed25519 -N '' -f "$TMP/key"
-docker run -d --name vsc-smoke --user "$UID_GID" -p 18080:8080 -p 12222:2222 \
+docker run -d --name vsc-smoke --user "$UID_GID" --group-add 1000870000 -p 18080:8080 -p 12222:2222 \
   -e PASSWORD='smoke-test-pw' -e SSH_AUTHORIZED_KEYS="$(cat "$TMP/key.pub")" "$IMAGE" >/dev/null
 
 for _ in $(seq 1 60); do curl -fs localhost:18080/healthz >/dev/null && break; sleep 2; done
@@ -58,5 +58,6 @@ echo "ssh OK as $(whoami) uid=$(id -u), java at $(command -v java)"
 echo "seeded extensions: $(ls ~/.local/share/code-server/extensions | grep -vc json)"
 grep -q "approval_policy = \"never\"" ~/.codex/config.toml && echo "codex auto-approve: OK"
 grep -q bypassPermissions ~/.claude/settings.json && echo "claude auto-approve: OK"
+! groups 2>&1 | grep -q "cannot find name" && echo "groups: OK ($(groups))"
 '
 echo "SMOKE TEST PASSED"

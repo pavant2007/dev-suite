@@ -8,6 +8,12 @@ if [ "$(id -u)" != "$(id -u coder 2>/dev/null)" ] && [ -w /etc/passwd ]; then
   echo "coder:x:$(id -u):0:coder:${HOME}:/bin/bash" >> /tmp/passwd
   cat /tmp/passwd > /etc/passwd && rm -f /tmp/passwd
 fi
+# Name any supplemental GIDs OpenShift added (e.g. the namespace fsGroup) so `groups`/`id` don't warn.
+if [ -w /etc/group ]; then
+  for gid in $(id -G); do
+    getent group "$gid" >/dev/null || echo "ocp-${gid}:x:${gid}:coder" >> /etc/group
+  done
+fi
 
 # Seed baked-in extensions into HOME (which may be an empty PVC on first start).
 EXT_DIR="${HOME}/.local/share/code-server/extensions"

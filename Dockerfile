@@ -194,7 +194,7 @@ RUN ln -s /opt/python/current/bin/python3 /usr/local/bin/python \
  && rm -f /etc/ssh/ssh_host_* \
  && chgrp -R 0 /home/coder /opt/vscode-extensions \
  && chmod -R g=u /home/coder /opt/vscode-extensions \
- && chmod g=u /etc/passwd
+ && chmod g=u /etc/passwd /etc/group
 
 USER 1001
 WORKDIR /home/coder/workspace
