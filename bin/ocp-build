@@ -1,0 +1,59 @@
+#!/bin/bash
+# Build a Dockerfile with OpenShift Builds (no Docker daemon needed).
+# The image is pushed to the namespace's internal registry as an ImageStreamTag.
+#
+# Usage: ocp-build [-t NAME[:TAG]] [-f Dockerfile] [--build-arg K=V ...] [CONTEXT_DIR]
+set -euo pipefail
+
+NS="${OCP_NAMESPACE:-$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || oc project -q)}"
+TAG="" FILE="" CTX="" ARGS=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t|--tag)          TAG="$2"; shift 2 ;;
+    --tag=*)           TAG="${1#*=}"; shift ;;
+    -f|--file)         FILE="$2"; shift 2 ;;
+    --file=*)          FILE="${1#*=}"; shift ;;
+    --build-arg)       ARGS+=(--build-arg "$2"); shift 2 ;;
+    --build-arg=*)     ARGS+=(--build-arg "${1#*=}"); shift ;;
+    --platform|--target|--network|--progress|--cache-from|--label)
+                       echo "ocp-build: ignoring $1 $2" >&2; shift 2 ;;
+    --platform=*|--target=*|--network=*|--progress=*|--cache-from=*|--label=*|--pull|--no-cache|-q|--quiet|--load|--push|--rm)
+                       echo "ocp-build: ignoring $1" >&2; shift ;;
+    -h|--help)         sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*)                echo "ocp-build: unsupported option $1" >&2; exit 2 ;;
+    *)                 CTX="$1"; shift ;;
+  esac
+done
+
+CTX="${CTX:-.}"
+[ -d "$CTX" ] || { echo "ocp-build: context '$CTX' is not a directory" >&2; exit 2; }
+CTX="$(cd "$CTX" && pwd)"
+
+# Image name: last path segment of -t (registry/org prefixes dropped), else the directory name.
+REF="${TAG:-$(basename "$CTX")}"
+REF="${REF##*/}"
+NAME="${REF%%:*}"; ITAG="latest"; [[ "$REF" == *:* ]] && ITAG="${REF##*:}"
+NAME="$(echo "$NAME" | tr '[:upper:]_.' '[:lower:]--' | sed 's/[^a-z0-9-]//g; s/^-*//; s/-*$//' | cut -c1-50)"
+[ -n "$NAME" ] || { echo "ocp-build: cannot derive an image name, use -t" >&2; exit 2; }
+
+DOCKERFILE="Dockerfile"
+if [ -n "$FILE" ]; then
+  ABS="$(cd "$(dirname "$FILE")" && pwd)/$(basename "$FILE")"
+  case "$ABS" in
+    "$CTX"/*) DOCKERFILE="${ABS#"$CTX"/}" ;;
+    *) echo "ocp-build: -f must be inside the build context" >&2; exit 2 ;;
+  esac
+fi
+
+if ! oc -n "$NS" get bc "$NAME" >/dev/null 2>&1; then
+  oc -n "$NS" new-build --name="$NAME" --strategy=docker --binary --to="$NAME:$ITAG" >/dev/null
+  echo "ocp-build: created BuildConfig $NAME"
+fi
+oc -n "$NS" patch bc "$NAME" --type=merge -p "{\"spec\":{\"output\":{\"to\":{\"kind\":\"ImageStreamTag\",\"name\":\"$NAME:$ITAG\"}},\"strategy\":{\"dockerStrategy\":{\"dockerfilePath\":\"$DOCKERFILE\"}}}}" >/dev/null
+
+oc -n "$NS" start-build "$NAME" --from-dir="$CTX" "${ARGS[@]}" --follow --wait
+
+echo
+echo "Image: image-registry.openshift-image-registry.svc:5000/$NS/$NAME:$ITAG"
+echo "Run it: oc -n $NS new-app --image-stream=$NAME:$ITAG --name=$NAME   (or oc run $NAME --image=<image above>)"

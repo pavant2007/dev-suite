@@ -10,7 +10,7 @@ Browser VS Code (code-server) on Ubuntu 24.04, x86_64 (linux/amd64).
 | Gradle | 9.8.2 (`GRADLE_VERSION`) |
 | Python | latest 3.x (`PYTHON_VERSION=3`, e.g. `3.14` to pin) + pip/pip3 |
 | Python libs | `requirements.txt`: fastapi[standard], uvicorn, pydantic, numpy, pandas, ta, requests, httpx, python-dotenv, pytest, ruff |
-| Docker | CLI 29 + buildx + compose plugins |
+| Docker | CLI 29 + buildx + compose; `docker build` uses OpenShift Builds when there's no daemon |
 | Git | Ubuntu 24.04 package |
 | Claude Code | latest native binary (`CLAUDE_VERSION`), checksum-verified |
 | OpenAI Codex CLI | 0.166.0 (`CODEX_VERSION`) |
@@ -37,6 +37,7 @@ agent-defaults/            # auto-approve configs seeded into $HOME on first sta
 openshift/
   kustomization.yaml       # oc apply -k openshift/
   secret.example.yaml      # copy to secret.yaml (git-ignored): password, SSH keys, API keys
+  rbac.yaml                # RoleBinding: vscode SA -> edit (lets it run OpenShift builds)
   serviceaccount.yaml  pvc.yaml  deployment.yaml  service.yaml  route.yaml
   dind-sidecar-patch.yaml  # optional Docker daemon sidecar (privileged)
 ```
@@ -95,7 +96,29 @@ Antigravity installs its own server (`~/.antigravity-server`) over SSH the first
 
 The `wg` and `wg-quick` tools are installed, and the WireGuard kernel module comes from the node (RHCOS ships it). Bringing up a tunnel inside the pod needs root plus the `NET_ADMIN` capability, which `restricted-v2` doesn't allow. A cluster admin has to grant a custom SCC for that. Without one, use `wg genkey` and similar commands for key and config work only.
 
-### Optional: Docker inside the pod
+### Docker on OpenShift (`docker build` without a daemon)
+
+OpenShift's default `restricted-v2` policy can't run a Docker daemon, and neither can rootless Podman (seccomp blocks user namespaces). The image therefore ships a `docker` wrapper:
+
+| Command | What happens |
+|---|---|
+| `docker build -t myapp:v1 .` | runs [`ocp-build`](bin/ocp-build): an OpenShift Docker-strategy build of the directory, pushed to `image-registry.openshift-image-registry.svc:5000/<ns>/myapp:v1` |
+| `docker images` | lists the namespace's ImageStreamTags |
+| `docker run …` | prints how to do it with OpenShift: `oc run NAME --image=…` or `oc new-app --image-stream=myapp:v1` |
+| anything else | real Docker CLI, used as-is whenever `DOCKER_HOST` is set or a daemon socket exists |
+
+`-f`, `--build-arg` and `-t` are supported. The pod's service account needs build rights in its namespace, which `rbac.yaml` grants.
+
+**Developer Sandbox:** you have namespace access but no cluster access. The RoleBinding has to be created by your own user (namespace admin), not by a service account:
+
+```bash
+oc login --web https://api.<sandbox-cluster>:6443
+oc apply -f openshift/rbac.yaml -n <your-namespace>
+```
+
+Or run the pod as an existing SA that can already build: `oc patch deploy vscode -p '{"spec":{"template":{"spec":{"serviceAccountName":"<sa>"}}}}'`.
+
+### Optional: Docker daemon sidecar (not on Developer Sandbox)
 
 The restricted SCC does not allow a Docker daemon. If your cluster policy allows privileged pods:
 

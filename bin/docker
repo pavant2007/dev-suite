@@ -1,0 +1,31 @@
+#!/bin/bash
+# docker wrapper: uses the real Docker CLI when a daemon is reachable,
+# otherwise maps common commands onto OpenShift (no daemon in restricted pods).
+REAL=/usr/local/libexec/docker-cli/docker
+
+if [ -n "${DOCKER_HOST:-}" ] || [ -n "${DOCKER_CONTEXT:-}" ] || [ -S /var/run/docker.sock ]; then
+  exec "$REAL" "$@"
+fi
+
+NS="${OCP_NAMESPACE:-$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)}"
+
+case "${1:-}" in
+  build)               shift;   exec ocp-build "$@" ;;
+  buildx)              [ "${2:-}" = build ] && { shift 2; exec ocp-build "$@"; }
+                                exec "$REAL" "$@" ;;
+  images)                       exec oc -n "$NS" get imagestreamtags ;;
+  image)               [[ "${2:-}" =~ ^(ls|list)$ ]] && exec oc -n "$NS" get imagestreamtags ;;
+  ""|-*|help|version|login|logout|context|completion|compose)
+                                exec "$REAL" "$@" ;;
+esac
+
+cat >&2 <<EOF
+docker: no Docker daemon in this pod (OpenShift restricted SCC).
+  docker build ...   -> works: builds with OpenShift Builds (ocp-build)
+  docker images      -> works: lists ImageStreamTags in namespace ${NS:-<ns>}
+  docker run/compose -> use OpenShift instead, e.g.:
+      oc run NAME --image=image-registry.openshift-image-registry.svc:5000/${NS:-<ns>}/IMAGE:TAG
+      oc new-app --image-stream=IMAGE:TAG --name=NAME
+  Or point at a remote daemon: export DOCKER_HOST=tcp://host:2375
+EOF
+exit 1

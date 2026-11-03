@@ -3,12 +3,13 @@ kind: Kustomization
 
 resources:
   - serviceaccount.yaml
+  - rbac.yaml
   - secret.yaml
   - pvc.yaml
   - deployment.yaml
   - service.yaml
   - route.yaml
 
-# Uncomment to run `docker build/run` inside the pod (needs the privileged SCC, see README)
+# Uncomment for a real Docker daemon in the pod (needs the privileged SCC; not possible on Developer Sandbox)
 # patches:
 #   - path: dind-sidecar-patch.yaml

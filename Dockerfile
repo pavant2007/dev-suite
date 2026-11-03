@@ -166,7 +166,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/*
 
 COPY --from=jdk       /opt/java/openjdk /opt/java/openjdk
-COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=dockercli /usr/local/bin/docker /usr/local/libexec/docker-cli/docker
 COPY --from=dockercli /usr/local/libexec/docker/cli-plugins /usr/local/libexec/docker/cli-plugins
 COPY --from=fetch     /opt/maven            /opt/maven
 COPY --from=fetch     /opt/gradle           /opt/gradle
@@ -181,6 +181,8 @@ COPY --from=cloud     /opt/google-cloud-sdk /opt/google-cloud-sdk
 COPY --from=cloud     /opt/aws-cli          /opt/aws-cli
 COPY                  agent-defaults/       /opt/agent-defaults/
 COPY --chmod=0755     entrypoint.sh         /usr/local/bin/entrypoint.sh
+# docker wrapper + ocp-build: `docker build` uses OpenShift Builds when no daemon is reachable
+COPY --chmod=0755     bin/docker bin/ocp-build /usr/local/bin/
 
 # OpenShift runs containers with a random UID in group 0:
 # make HOME and /etc/passwd group-0 writable so any UID works.

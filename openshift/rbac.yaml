@@ -1,0 +1,15 @@
+# Lets the dev box run OpenShift Builds (`docker build` -> ocp-build) and
+# manage workloads (oc run / new-app) in its own namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vscode-edit
+  labels:
+    app: vscode
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+subjects:
+  - kind: ServiceAccount
+    name: vscode
