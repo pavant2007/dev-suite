@@ -1,143 +1,96 @@
-# dev-suite — code-server dev image for OpenShift
+# dev-suite
 
-Browser VS Code (code-server) on Ubuntu 24.04, x86_64 (linux/amd64).
+A ready-to-use **browser VS Code** development environment for **OpenShift**. You deploy it into one namespace and open it from a browser. It already contains the tools for Java, Python, containers, Kubernetes, the major clouds and AI coding agents.
 
-| Tool | Version (build arg) |
-|------|---------------------|
-| code-server | 4.144.0 (`CODE_SERVER_VERSION`) |
-| JDK | Eclipse Temurin 25 |
-| Maven | 3.9.16 (`MAVEN_VERSION`) |
-| Gradle | 9.8.2 (`GRADLE_VERSION`) |
-| Python | latest 3.x (`PYTHON_VERSION=3`, e.g. `3.14` to pin) + pip/pip3 |
-| Python libs | `requirements.txt`: fastapi[standard], uvicorn, pydantic, numpy, pandas, ta, requests, httpx, python-dotenv, pytest, ruff |
-| Docker | CLI 29 + buildx + compose; without a daemon `docker build/run/compose` run on OpenShift |
-| Git | Ubuntu 24.04 package |
-| Claude Code | latest native binary (`CLAUDE_VERSION`), checksum-verified |
-| OpenAI Codex CLI | 0.166.0 (`CODEX_VERSION`) |
-| kubectl | v1.37.2 (`KUBECTL_VERSION`), checksum-verified |
-| oc (OpenShift CLI) | stable channel, currently 4.22.18 (`OC_CHANNEL`) |
-| Google Cloud CLI | latest `gcloud`, `gsutil`, `bq` + `gke-gcloud-auth-plugin` |
-| AWS CLI | v2 latest |
-| WireGuard | `wireguard-tools` (`wg`, `wg-quick`) + `iproute2` |
-| OpenSSH server | for Antigravity Remote-SSH (non-root, key-only, port 2222) |
+It runs under OpenShift's default `restricted-v2` security policy (non-root, random UID, no special permissions), so it also works on **Red Hat Developer Sandbox** and other clusters where you only have access to one namespace.
 
-Extensions baked in (`EXTENSIONS` build arg): Java pack (redhat.java, debug, test, dependency, Maven, Gradle), Python + debugpy, Docker, YAML.
+> **New here? Read the [User Manual](docs/USER_MANUAL.md).** It covers logging in, daily use, Docker on OpenShift, AI agents and troubleshooting.
 
-How it stays small: multi-stage build (the cloud CLIs build in a parallel stage), only the binaries are copied out, no compilers or apt caches, Python test suites stripped. Docker is the CLI only — the daemon runs in an optional sidecar.
+## What's inside
 
-## Files
-
-```
-.github/workflows/build-image.yml   # CI: build, smoke test, push to GHCR
-ci/smoke-test.sh
-Dockerfile, entrypoint.sh, requirements.txt, .dockerignore
-agent-defaults/            # auto-approve configs seeded into $HOME on first start
-  claude/settings.json     # permissions.defaultMode = bypassPermissions
-  codex/config.toml        # approval_policy = never, sandbox_mode = danger-full-access
-openshift/
-  kustomization.yaml       # oc apply -k openshift/
-  secret.example.yaml      # copy to secret.yaml (git-ignored): password, SSH keys, API keys
-  rbac.yaml                # RoleBinding: vscode SA -> edit (lets it run OpenShift builds)
-  serviceaccount.yaml  pvc.yaml  deployment.yaml  service.yaml  route.yaml
-  dind-sidecar-patch.yaml  # optional Docker daemon sidecar (privileged)
-```
-
-## Build (GitHub Actions)
-
-[`.github/workflows/build-image.yml`](.github/workflows/build-image.yml) runs on GitHub-hosted x86 runners for each push to `main`, each `v*` tag and each PR. It:
-
-1. builds the linux/amd64 image, with layers cached between runs in the GitHub Actions cache
-2. runs [`ci/smoke-test.sh`](ci/smoke-test.sh): every tool's version, the Python imports, code-server login, and SSH, all as a random OpenShift UID
-3. pushes to **`ghcr.io/pavant2007/dev-suite`** with the tags `latest`, `sha-<commit>` and `vX.Y.Z` (PRs build and test only)
-
-You can trigger it by hand from Actions → build-image → Run workflow.
-
-**Public image:** `ghcr.io/pavant2007/dev-suite` is public, so anyone can pull it without logging in, and OpenShift doesn't need a pull secret:
-
-```bash
-docker pull ghcr.io/pavant2007/dev-suite:latest
-```
-
-Local build (slow on Apple Silicon because amd64 is emulated): `docker build --platform linux/amd64 -t dev-suite:local . && ci/smoke-test.sh dev-suite:local`
-
-## Deploy
-
-```bash
-cp openshift/secret.example.yaml openshift/secret.yaml   # git-ignored: set password, SSH key, API keys
-oc apply -k openshift/ -n vscode
-oc get route vscode -n vscode -o jsonpath='https://{.spec.host}{"\n"}'
-```
-
-`/home/coder` sits on a PVC, so the workspace, settings, extensions and the `~/.m2` and `~/.gradle` caches survive restarts.
-
-### AI agents (auto-approve)
-
-Claude Code and Codex start in auto-approve mode: no permission prompts and full access to the container. The pod itself still runs non-root under `restricted-v2`, so the agents can't affect the node or the cluster. The defaults are copied into `~/.claude/settings.json` and `~/.codex/config.toml` only if those files don't already exist, so your own edits are kept.
-
-To log in, open the code-server terminal and run `claude` and `codex login`, or put the API keys in `secret.yaml`.
-
-### Antigravity (Remote-SSH)
-
-Antigravity installs its own server (`~/.antigravity-server`) over SSH the first time it connects, and that server must match the client's version, so it can't be built into the image. The image provides what Antigravity needs to install it: sshd, tar, curl and a writable, persistent home directory.
-
-1. Put your public key into `ssh-authorized-keys` in `openshift/secret.yaml` and apply.
-2. `oc port-forward svc/vscode 2222:2222 -n vscode`
-3. Add to `~/.ssh/config` on your machine:
-   ```
-   Host ocp-vscode
-     HostName localhost
-     Port 2222
-     User coder
-   ```
-4. In Antigravity: Remote-SSH → Connect to Host → `ocp-vscode`.
-5. For full agent permissions, set the agent's terminal-execution and review policies to "Always proceed" in Antigravity's settings. These are client-side settings.
-
-### WireGuard
-
-The `wg` and `wg-quick` tools are installed, and the WireGuard kernel module comes from the node (RHCOS ships it). Bringing up a tunnel inside the pod needs root plus the `NET_ADMIN` capability, which `restricted-v2` doesn't allow. A cluster admin has to grant a custom SCC for that. Without one, use `wg genkey` and similar commands for key and config work only.
-
-### Docker on OpenShift (no daemon needed)
-
-OpenShift's default `restricted-v2` policy can't run a Docker daemon, and neither can rootless Podman (seccomp blocks user namespaces). The image therefore ships a `docker` wrapper that maps the everyday commands onto OpenShift in the pod's own namespace:
-
-| Command | What happens on OpenShift |
+| Area | Tools |
 |---|---|
-| `docker build -t myapp:v1 .` | [`ocp-build`](bin/ocp-build): OpenShift Docker-strategy build, pushed to `image-registry.openshift-image-registry.svc:5000/<ns>/myapp:v1` |
-| `docker run [--rm] [-it] [-e K=V] IMAGE [ARGS]` | `oc run` pod, attached; `myapp:v1` resolves to the namespace image |
-| `docker run -d --name web -p 8080 IMAGE` | detached pod + Service `web:8080` (other pods reach `http://web:8080`) |
-| `docker ps` / `logs` / `exec -it` / `stop` / `rm` | `oc get pods` / `logs` / `exec` / `delete` |
-| `docker images` | the namespace's ImageStreamTags |
-| `docker compose up -d` / `down` / `ps` / `logs SVC` | [`ocp-compose`](bin/ocp-compose): builds `build:` services, then one Deployment + Service per service (same names, so services reach each other as in compose); published ports get an HTTPS Route; named volumes become 1Gi PVCs |
-| anything else | the real Docker CLI, used as-is whenever `DOCKER_HOST` is set or a daemon socket exists |
+| Editor | code-server 4.144 (VS Code in the browser) with Java, Maven, Gradle, Python, Docker and YAML extensions |
+| Java | Eclipse Temurin JDK 25, Maven 3.9, Gradle 9.8 |
+| Python | Python 3.15 + pip, with FastAPI, uvicorn, pydantic, NumPy, pandas, ta, requests, httpx, PyYAML, pytest, ruff |
+| Containers | Docker CLI 29 (+ buildx, compose). With no Docker daemon, `docker build / run / compose` run on OpenShift instead |
+| Kubernetes | `kubectl` 1.37, `oc` 4.22 |
+| Cloud | Google Cloud CLI (`gcloud`, `gsutil`, `bq`, GKE auth plugin), AWS CLI v2 |
+| AI agents | Claude Code, OpenAI Codex CLI (preconfigured to run without approval prompts) |
+| Other | Git, OpenSSH server (for Antigravity / VS Code Remote-SSH), WireGuard tools, jq, ripgrep |
 
-Limits: images must run as a non-root, random UID (official `nginx`, `postgres`, `redis` images don't; use `nginxinc/nginx-unprivileged`, `registry.redhat.io`/UBI or Bitnami variants). Bind mounts, `depends_on`, `privileged` and `user` are ignored. There is no `-p HOST:CONTAINER` port on your laptop; use the Route URL or `oc port-forward`.
+Image: **`ghcr.io/pavant2007/dev-suite:latest`**. It's public, linux/amd64, about 1.6 GB.
 
-`-f`, `--build-arg` and `-t` are supported. The pod's service account needs build rights in its namespace, which `rbac.yaml` grants.
+## Quick start (5 minutes)
 
-**Developer Sandbox:** you have namespace access but no cluster access. The RoleBinding has to be created by your own user (namespace admin), not by a service account:
+You need the `oc` CLI and access to an OpenShift namespace.
 
 ```bash
-oc login --web https://api.<sandbox-cluster>:6443
-oc apply -f openshift/rbac.yaml -n <your-namespace>
+git clone https://github.com/pavant2007/dev-suite.git && cd dev-suite
+
+# 1. Set your login password (this file is git-ignored)
+cp openshift/secret.example.yaml openshift/secret.yaml
+#    edit openshift/secret.yaml -> password: "<your-strong-password>"
+
+# 2. Deploy into your namespace
+oc login ...                              # as a user who is admin of the namespace
+oc apply -k openshift/ -n <your-namespace>
+
+# 3. Open it
+oc get route vscode -n <your-namespace> -o jsonpath='https://{.spec.host}{"\n"}'
 ```
 
-Or run the pod as an existing SA that can already build: `oc patch deploy vscode -p '{"spec":{"template":{"spec":{"serviceAccountName":"<sa>"}}}}'`.
+Open the URL and enter your password. Your files in `/home/coder` live on a persistent volume and survive restarts.
 
-### Optional: Docker daemon sidecar (not on Developer Sandbox)
-
-The restricted SCC does not allow a Docker daemon. If your cluster policy allows privileged pods:
+To try it locally (no OpenShift features):
 
 ```bash
-oc adm policy add-scc-to-user privileged -z vscode -n vscode
-# uncomment the `patches:` block in openshift/kustomization.yaml, then:
-oc apply -k openshift/ -n vscode
-```
-
-If you can't get privileged pods, set `DOCKER_HOST` to a remote Docker host instead, or build images with OpenShift BuildConfigs.
-
-## Run locally (smoke test)
-
-```bash
-docker run --rm -p 8080:8080 -e PASSWORD='<your-password>' vscode-dev:latest
+docker run --rm -p 8080:8080 -e PASSWORD='<your-password>' ghcr.io/pavant2007/dev-suite:latest
 # open http://localhost:8080
 ```
+
+## Repository layout
+
+```
+Dockerfile                  # multi-stage build of the image
+entrypoint.sh               # startup: OpenShift UID handling, seeds extensions/agent config, starts sshd + code-server
+requirements.txt            # Python libraries baked into the image
+bin/
+  docker                    # docker wrapper: real CLI when a daemon exists, else maps to OpenShift
+  ocp-build                 # docker build -> OpenShift Build
+  ocp-compose               # docker compose -> Deployments/Services/Routes
+agent-defaults/             # Claude Code / Codex auto-approve defaults (copied to $HOME once)
+openshift/                  # deployment manifests (oc apply -k openshift/)
+  secret.example.yaml       #   copy to secret.yaml: password, SSH keys, API keys
+  rbac.yaml                 #   lets the pod run builds and deploy in its own namespace
+  deployment.yaml service.yaml route.yaml pvc.yaml serviceaccount.yaml kustomization.yaml
+  dind-sidecar-patch.yaml   #   optional real Docker daemon (needs privileged pods, not on Sandbox)
+ci/smoke-test.sh            # image tests run in CI
+.github/workflows/build-image.yml
+docs/USER_MANUAL.md
+```
+
+## How the image is built
+
+GitHub Actions ([build-image.yml](.github/workflows/build-image.yml)) runs on GitHub-hosted x86 runners for every push to `main`, every `v*` tag and every pull request:
+
+1. builds the linux/amd64 image, with layers cached between runs
+2. runs [ci/smoke-test.sh](ci/smoke-test.sh) as a random OpenShift-style UID: every tool's version, the Python imports, code-server login, SSH login and agent defaults
+3. pushes `latest`, `sha-<commit>` and `vX.Y.Z` tags to GHCR. Pull requests only build and test.
+
+You can also run it by hand: **Actions → build-image → Run workflow**. Tool versions are build arguments at the top of the [Dockerfile](Dockerfile).
+
+Building locally works, but it's slow on Apple Silicon because amd64 is emulated:
+
+```bash
+docker build --platform linux/amd64 -t dev-suite:local . && ci/smoke-test.sh dev-suite:local
+```
+
+## Security notes
+
+- **Never commit secrets.** `openshift/secret.yaml` and `.env` are git-ignored. Only `secret.example.yaml`, which holds placeholders, belongs in git.
+- The pod runs **non-root** with no added capabilities. Its service account gets the namespace-scoped `edit` role (see [rbac.yaml](openshift/rbac.yaml)), so tools and agents inside it can manage that namespace and nothing else.
+- Claude Code and Codex are set to **auto-approve**, so they can run commands and edit files in the dev box without asking. Treat the dev box as their sandbox, and don't put credentials in it that you wouldn't give an agent.
+- The image is built without provenance or SBOM attestations, and CI uploads no build records, so no commit metadata is published with it.
+
+See the [User Manual](docs/USER_MANUAL.md) for everything else.
