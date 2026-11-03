@@ -2,6 +2,7 @@
 # docker wrapper: uses the real Docker CLI when a daemon is reachable,
 # otherwise maps common commands onto OpenShift (no daemon in restricted pods).
 REAL=/usr/local/libexec/docker-cli/docker
+REGISTRY=image-registry.openshift-image-registry.svc:5000
 
 if [ -n "${DOCKER_HOST:-}" ] || [ -n "${DOCKER_CONTEXT:-}" ] || [ -S /var/run/docker.sock ]; then
   exec "$REAL" "$@"
@@ -9,27 +10,97 @@ fi
 
 NS="${OCP_NAMESPACE:-$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)}"
 
+# Map a short image name to the internal registry when an ImageStreamTag with that name exists.
+resolve_image() {
+  local img="$1" name tag
+  [[ "$img" == */* ]] && { echo "$img"; return; }
+  name="${img%%:*}"; tag="latest"; [[ "$img" == *:* ]] && tag="${img##*:}"
+  if oc -n "$NS" get istag "$name:$tag" >/dev/null 2>&1; then
+    echo "$REGISTRY/$NS/$name:$tag"
+  else
+    echo "$img"
+  fi
+}
+
+docker_run() {
+  local name="" detach=0 rm=0 tty=0 stdin=0 image="" envs=() ports=() extra=() v
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -d|--detach)       detach=1; shift ;;
+      --rm)              rm=1; shift ;;
+      -it|-ti)           tty=1; stdin=1; shift ;;
+      -i|--interactive)  stdin=1; shift ;;
+      -t|--tty)          tty=1; shift ;;
+      --name)            name="$2"; shift 2 ;;
+      --name=*)          name="${1#*=}"; shift ;;
+      -e|--env)          envs+=(--env "$2"); shift 2 ;;
+      --env=*)           envs+=(--env "${1#*=}"); shift ;;
+      -p|--publish)      ports+=("${2##*:}"); shift 2 ;;
+      --publish=*)       v="${1#*=}"; ports+=("${v##*:}"); shift ;;
+      -w|--workdir|-u|--user|-v|--volume|--network|--platform|--restart|--entrypoint|-m|--memory|--cpus|--add-host|--label|-l)
+                         echo "docker run: ignoring $1 $2 on OpenShift" >&2; shift 2 ;;
+      --*=*|--privileged|--init|-P|--publish-all)
+                         echo "docker run: ignoring $1 on OpenShift" >&2; shift ;;
+      -*)                echo "docker run: unsupported option $1" >&2; exit 2 ;;
+      *)                 image="$1"; shift; extra=("$@"); break ;;
+    esac
+  done
+  [ -n "$image" ] || { echo "docker run: image required" >&2; exit 2; }
+  image="$(resolve_image "$image")"
+  [ -n "$name" ] || name="run-$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  name="$(echo "$name" | tr '[:upper:]_.' '[:lower:]--')"
+
+  local args=(run "$name" --image="$image" "${envs[@]}" --labels="app.kubernetes.io/managed-by=docker-run")
+  if [ "$detach" = 1 ]; then
+    oc -n "$NS" "${args[@]}" --restart=Always ${extra[@]:+-- "${extra[@]}"} >/dev/null || exit 1
+    for p in "${ports[@]}"; do oc -n "$NS" expose pod "$name" --port="$p" --name="$name" >/dev/null 2>&1; done
+    echo "$name"
+    [ ${#ports[@]} -gt 0 ] && echo "Service $name:${ports[0]} created. Public HTTPS URL: oc create route edge --service=$name" >&2
+    exit 0
+  fi
+  local fg=(--restart=Never --attach)
+  [ "$stdin" = 1 ] && fg+=(-i)
+  [ "$tty" = 1 ] && fg+=(-t)
+  oc -n "$NS" "${args[@]}" "${fg[@]}" ${extra[@]:+-- "${extra[@]}"}
+  local rc=$?
+  [ "$rm" = 1 ] && oc -n "$NS" delete pod "$name" --ignore-not-found --wait=false >/dev/null 2>&1
+  exit $rc
+}
+
 case "${1:-}" in
   build)               shift;   exec ocp-build "$@" ;;
   buildx)              [ "${2:-}" = build ] && { shift 2; exec ocp-build "$@"; }
                                 exec "$REAL" "$@" ;;
+  compose)             [ "${2:-}" = version ] && exec "$REAL" "$@"
+                       shift;   exec ocp-compose "$@" ;;
+  run)                 shift;   docker_run "$@" ;;
   images|ls)                    exec oc -n "$NS" get imagestreamtags ;;
   image)               [[ "${2:-}" =~ ^(ls|list)$ ]] && exec oc -n "$NS" get imagestreamtags ;;
   ps)                           exec oc -n "$NS" get pods -o wide ;;
   container)           [[ "${2:-}" =~ ^(ls|list|ps)$ ]] && exec oc -n "$NS" get pods -o wide ;;
   logs)                shift;   exec oc -n "$NS" logs "$@" ;;
-  ""|-*|help|version|login|logout|context|completion|compose)
+  exec)                shift; opts=()
+                       while [[ "${1:-}" == -* ]]; do
+                         case "$1" in -it|-ti) opts+=(-i -t) ;; -i|-t) opts+=("$1") ;; esac; shift
+                       done
+                       pod="$1"; shift
+                       exec oc -n "$NS" exec "${opts[@]}" "$pod" -- "$@" ;;
+  stop|rm|kill)        shift; pods=()
+                       for a in "$@"; do [[ "$a" == -* ]] || pods+=("$a"); done
+                       oc -n "$NS" delete svc "${pods[@]}" --ignore-not-found >/dev/null 2>&1
+                       exec oc -n "$NS" delete pod "${pods[@]}" --ignore-not-found --wait=false ;;
+  ""|-*|help|version|login|logout|context|completion)
                                 exec "$REAL" "$@" ;;
 esac
 
 cat >&2 <<EOF
-docker: no Docker daemon in this pod (OpenShift restricted SCC).
-  docker build ...   -> works: builds with OpenShift Builds (ocp-build)
-  docker images      -> works: lists ImageStreamTags in namespace ${NS:-<ns>}
-  docker ps / logs   -> works: lists pods / shows pod logs (oc get pods, oc logs)
-  docker run/compose -> use OpenShift instead, e.g.:
-      oc run NAME --image=image-registry.openshift-image-registry.svc:5000/${NS:-<ns>}/IMAGE:TAG
-      oc new-app --image-stream=IMAGE:TAG --name=NAME
-  Or point at a remote daemon: export DOCKER_HOST=tcp://host:2375
+docker: no Docker daemon in this pod (OpenShift restricted SCC). Mapped to OpenShift:
+  docker build -t app:v1 .        -> OpenShift Build (ocp-build), image in namespace ${NS:-<ns>}
+  docker run [-d] [-it] [--rm] [-e K=V] [-p PORT] IMAGE [ARGS] -> oc run (pod)
+  docker ps | logs | exec | stop | rm -> oc get pods | logs | exec | delete
+  docker images                   -> ImageStreamTags in the namespace
+  docker compose up|down|ps|logs  -> Deployments/Services/Routes (ocp-compose)
+Images must run as a non-root, random UID on OpenShift.
+Or point at a remote daemon: export DOCKER_HOST=tcp://host:2375
 EOF
 exit 1

@@ -26,6 +26,7 @@ python3 -c "import fastapi, numpy, pandas, ta, uvicorn, pydantic, requests, http
 git --version
 docker --version
 ocp-build --help | head -1
+ocp-compose --help | head -1
 docker compose version
 docker buildx version | cut -d" " -f1-2
 echo "code-server $(code-server --version 2>/dev/null | grep -m1 -E "^[0-9]+\.")"

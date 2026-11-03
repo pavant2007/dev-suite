@@ -10,7 +10,7 @@ Browser VS Code (code-server) on Ubuntu 24.04, x86_64 (linux/amd64).
 | Gradle | 9.8.2 (`GRADLE_VERSION`) |
 | Python | latest 3.x (`PYTHON_VERSION=3`, e.g. `3.14` to pin) + pip/pip3 |
 | Python libs | `requirements.txt`: fastapi[standard], uvicorn, pydantic, numpy, pandas, ta, requests, httpx, python-dotenv, pytest, ruff |
-| Docker | CLI 29 + buildx + compose; `docker build` uses OpenShift Builds when there's no daemon |
+| Docker | CLI 29 + buildx + compose; without a daemon `docker build/run/compose` run on OpenShift |
 | Git | Ubuntu 24.04 package |
 | Claude Code | latest native binary (`CLAUDE_VERSION`), checksum-verified |
 | OpenAI Codex CLI | 0.166.0 (`CODEX_VERSION`) |
@@ -96,17 +96,21 @@ Antigravity installs its own server (`~/.antigravity-server`) over SSH the first
 
 The `wg` and `wg-quick` tools are installed, and the WireGuard kernel module comes from the node (RHCOS ships it). Bringing up a tunnel inside the pod needs root plus the `NET_ADMIN` capability, which `restricted-v2` doesn't allow. A cluster admin has to grant a custom SCC for that. Without one, use `wg genkey` and similar commands for key and config work only.
 
-### Docker on OpenShift (`docker build` without a daemon)
+### Docker on OpenShift (no daemon needed)
 
-OpenShift's default `restricted-v2` policy can't run a Docker daemon, and neither can rootless Podman (seccomp blocks user namespaces). The image therefore ships a `docker` wrapper:
+OpenShift's default `restricted-v2` policy can't run a Docker daemon, and neither can rootless Podman (seccomp blocks user namespaces). The image therefore ships a `docker` wrapper that maps the everyday commands onto OpenShift in the pod's own namespace:
 
-| Command | What happens |
+| Command | What happens on OpenShift |
 |---|---|
-| `docker build -t myapp:v1 .` | runs [`ocp-build`](bin/ocp-build): an OpenShift Docker-strategy build of the directory, pushed to `image-registry.openshift-image-registry.svc:5000/<ns>/myapp:v1` |
-| `docker images` | lists the namespace's ImageStreamTags |
-| `docker ps`, `docker logs POD` | `oc get pods`, `oc logs POD` |
-| `docker run …` | prints how to do it with OpenShift: `oc run NAME --image=…` or `oc new-app --image-stream=myapp:v1` |
-| anything else | real Docker CLI, used as-is whenever `DOCKER_HOST` is set or a daemon socket exists |
+| `docker build -t myapp:v1 .` | [`ocp-build`](bin/ocp-build): OpenShift Docker-strategy build, pushed to `image-registry.openshift-image-registry.svc:5000/<ns>/myapp:v1` |
+| `docker run [--rm] [-it] [-e K=V] IMAGE [ARGS]` | `oc run` pod, attached; `myapp:v1` resolves to the namespace image |
+| `docker run -d --name web -p 8080 IMAGE` | detached pod + Service `web:8080` (other pods reach `http://web:8080`) |
+| `docker ps` / `logs` / `exec -it` / `stop` / `rm` | `oc get pods` / `logs` / `exec` / `delete` |
+| `docker images` | the namespace's ImageStreamTags |
+| `docker compose up -d` / `down` / `ps` / `logs SVC` | [`ocp-compose`](bin/ocp-compose): builds `build:` services, then one Deployment + Service per service (same names, so services reach each other as in compose); published ports get an HTTPS Route; named volumes become 1Gi PVCs |
+| anything else | the real Docker CLI, used as-is whenever `DOCKER_HOST` is set or a daemon socket exists |
+
+Limits: images must run as a non-root, random UID (official `nginx`, `postgres`, `redis` images don't; use `nginxinc/nginx-unprivileged`, `registry.redhat.io`/UBI or Bitnami variants). Bind mounts, `depends_on`, `privileged` and `user` are ignored. There is no `-p HOST:CONTAINER` port on your laptop; use the Route URL or `oc port-forward`.
 
 `-f`, `--build-arg` and `-t` are supported. The pod's service account needs build rights in its namespace, which `rbac.yaml` grants.
 

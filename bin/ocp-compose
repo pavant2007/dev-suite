@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Run a docker-compose file on OpenShift (no Docker daemon needed).
+
+Usage: ocp-compose [-f FILE] [-p PROJECT] up [-d] [--build] [SERVICE...]
+       ocp-compose [-f FILE] [-p PROJECT] down [-v]
+       ocp-compose [-f FILE] [-p PROJECT] ps
+       ocp-compose [-f FILE] [-p PROJECT] logs [-f] SERVICE
+
+Each service becomes a Deployment + Service named after the compose service,
+so services reach each other by name, as in compose. `build:` sections are
+built with OpenShift Builds (ocp-build). Published ports get an HTTPS Route.
+Named volumes become PVCs. Bind mounts, depends_on and restart are ignored.
+"""
+import json
+import os
+import shlex
+import subprocess
+import sys
+
+import yaml
+
+SA_NS = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+REGISTRY = "image-registry.openshift-image-registry.svc:5000"
+
+
+def die(msg):
+    print(f"ocp-compose: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def warn(msg):
+    print(f"ocp-compose: warning: {msg}", file=sys.stderr)
+
+
+def namespace():
+    if os.environ.get("OCP_NAMESPACE"):
+        return os.environ["OCP_NAMESPACE"]
+    try:
+        return open(SA_NS).read().strip()
+    except OSError:
+        return subprocess.run(["oc", "project", "-q"], capture_output=True, text=True).stdout.strip()
+
+
+def find_file(explicit):
+    if explicit:
+        return explicit
+    for name in ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"):
+        if os.path.exists(name):
+            return name
+    die("no compose.yaml / docker-compose.yml in this directory (use -f)")
+
+
+def k8s_name(s):
+    out = "".join(c if c.isalnum() else "-" for c in s.lower()).strip("-")
+    return out[:50] or "app"
+
+
+def env_list(env):
+    if not env:
+        return []
+    if isinstance(env, dict):
+        items = env.items()
+    else:
+        items = [(e.split("=", 1) + [""])[:2] if "=" in e else (e, os.environ.get(e, "")) for e in env]
+    return [{"name": str(k), "value": "" if v is None else str(v)} for k, v in items]
+
+
+def as_list(cmd):
+    if cmd is None:
+        return None
+    return shlex.split(cmd) if isinstance(cmd, str) else [str(c) for c in cmd]
+
+
+def parse_ports(ports):
+    """Return [(container_port, published?)]."""
+    out = []
+    for p in ports or []:
+        if isinstance(p, dict):
+            out.append((int(p["target"]), "published" in p))
+            continue
+        p = str(p).split("/")[0]
+        parts = p.split(":")
+        cport = parts[-1].split("-")[0]
+        out.append((int(cport), len(parts) > 1))
+    return out
+
+
+def oc(*args, input=None, check=True):
+    r = subprocess.run(["oc", "-n", NS, *args], input=input, text=True)
+    if check and r.returncode != 0:
+        die(f"oc {' '.join(args)} failed")
+    return r.returncode
+
+
+def build_image(svc, spec, project):
+    b = spec["build"]
+    ctx, dockerfile, args = (b, None, {}) if isinstance(b, str) else (b.get("context", "."), b.get("dockerfile"), b.get("args") or {})
+    name = k8s_name(f"{project}-{svc}")
+    cmd = ["ocp-build", "-t", f"{name}:latest"]
+    if dockerfile:
+        cmd += ["-f", os.path.join(ctx, dockerfile)]
+    items = args.items() if isinstance(args, dict) else [a.split("=", 1) for a in args]
+    for k, v in items:
+        cmd += ["--build-arg", f"{k}={v}"]
+    cmd.append(ctx)
+    print(f"--- building {svc}")
+    if subprocess.run(cmd).returncode != 0:
+        die(f"build of {svc} failed")
+    return f"{REGISTRY}/{NS}/{name}:latest"
+
+
+def manifests(svc, spec, image, project):
+    name = k8s_name(svc)
+    labels = {"app": name, "app.kubernetes.io/part-of": project, "app.kubernetes.io/managed-by": "ocp-compose"}
+    container = {"name": name, "image": image, "env": env_list(spec.get("environment"))}
+    if spec.get("entrypoint") is not None:
+        container["command"] = as_list(spec["entrypoint"])
+    if spec.get("command") is not None:
+        container["args"] = as_list(spec["command"])
+    if spec.get("working_dir"):
+        container["workingDir"] = spec["working_dir"]
+    ports = parse_ports(spec.get("ports")) + [(int(str(e).split("/")[0]), False) for e in spec.get("expose") or []]
+    if ports:
+        container["ports"] = [{"containerPort": p} for p, _ in ports]
+
+    objs, volumes, mounts = [], [], []
+    for v in spec.get("volumes") or []:
+        src, _, rest = (v.get("source"), None, v.get("target")) if isinstance(v, dict) else (str(v).split(":")[0], None, (str(v).split(":") + [""])[1])
+        if not rest:
+            continue
+        if src.startswith((".", "/", "~")):
+            warn(f"{svc}: bind mount {v} ignored (copy files into the image instead)")
+            continue
+        pvc = k8s_name(f"{project}-{src}")
+        volumes.append({"name": k8s_name(src), "persistentVolumeClaim": {"claimName": pvc}})
+        mounts.append({"name": k8s_name(src), "mountPath": rest})
+        objs.append({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+                     "metadata": {"name": pvc, "labels": {k: v for k, v in labels.items() if k != "app"}},
+                     "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "1Gi"}}}})
+    if mounts:
+        container["volumeMounts"] = mounts
+    for unsupported in ("depends_on", "restart", "privileged", "cap_add", "network_mode", "user"):
+        if unsupported in spec:
+            warn(f"{svc}: '{unsupported}' ignored on OpenShift")
+
+    pod = {"containers": [container]}
+    if volumes:
+        pod["volumes"] = volumes
+    objs.append({"apiVersion": "apps/v1", "kind": "Deployment",
+                 "metadata": {"name": name, "labels": labels},
+                 "spec": {"replicas": 1, "selector": {"matchLabels": {"app": name}},
+                          "strategy": {"type": "Recreate"} if volumes else {"type": "RollingUpdate"},
+                          "template": {"metadata": {"labels": labels}, "spec": pod}}})
+    if ports:
+        objs.append({"apiVersion": "v1", "kind": "Service", "metadata": {"name": name, "labels": labels},
+                     "spec": {"selector": {"app": name},
+                              "ports": [{"name": f"p{p}", "port": p, "targetPort": p} for p, _ in ports]}})
+        published = [p for p, pub in ports if pub]
+        if published:
+            objs.append({"apiVersion": "route.openshift.io/v1", "kind": "Route", "metadata": {"name": name, "labels": labels},
+                         "spec": {"to": {"kind": "Service", "name": name}, "port": {"targetPort": f"p{published[0]}"},
+                                  "tls": {"termination": "edge", "insecureEdgeTerminationPolicy": "Redirect"}}})
+    return objs
+
+
+def up(cfg, project, args):
+    detach = "-d" in args or "--detach" in args
+    wanted = [a for a in args if not a.startswith("-")]
+    services = {k: v for k, v in (cfg.get("services") or {}).items() if not wanted or k in wanted}
+    if not services:
+        die("no services to start")
+    objs = []
+    for svc, spec in services.items():
+        spec = spec or {}
+        if spec.get("build"):
+            image = build_image(svc, spec, project)
+        elif spec.get("image"):
+            image = spec["image"]
+        else:
+            die(f"service {svc} has neither image nor build")
+        objs += manifests(svc, spec, image, project)
+    existing = {s for s in services if subprocess.run(["oc", "-n", NS, "get", f"deploy/{k8s_name(s)}"],
+                                                       capture_output=True).returncode == 0}
+    oc("apply", "-f", "-", input=json.dumps({"apiVersion": "v1", "kind": "List", "items": objs}))
+    # Re-deploy services that already existed so rebuilt :latest images are picked up.
+    for svc in existing:
+        oc("rollout", "restart", f"deploy/{k8s_name(svc)}", check=False)
+    for svc in services:
+        oc("rollout", "status", f"deploy/{k8s_name(svc)}", "--timeout=180s", check=False)
+    oc("get", "deploy,svc,route", "-l", f"app.kubernetes.io/part-of={project}", check=False)
+    if not detach and len(services) == 1:
+        oc("logs", "-f", f"deploy/{k8s_name(next(iter(services)))}", check=False)
+    elif not detach:
+        print("\nRunning. Logs: docker compose logs -f SERVICE   Stop: docker compose down")
+
+
+def main():
+    argv = sys.argv[1:]
+    file = project = None
+    while argv and argv[0].startswith("-"):
+        opt = argv.pop(0)
+        if opt in ("-f", "--file"):
+            file = argv.pop(0)
+        elif opt in ("-p", "--project-name"):
+            project = argv.pop(0)
+        elif opt in ("-h", "--help"):
+            print(__doc__.strip())
+            return
+        else:
+            die(f"unsupported option {opt}")
+    if not argv:
+        print(__doc__.strip())
+        return
+    cmd, args = argv[0], argv[1:]
+    path = find_file(file)
+    os.chdir(os.path.dirname(os.path.abspath(path)))
+    cfg = yaml.safe_load(open(os.path.basename(path))) or {}
+    project = k8s_name(project or cfg.get("name") or os.path.basename(os.getcwd()))
+    sel = f"app.kubernetes.io/part-of={project}"
+
+    if cmd == "up":
+        up(cfg, project, args)
+    elif cmd in ("down", "stop", "rm"):
+        kinds = "deploy,svc,route" + (",pvc" if "-v" in args or "--volumes" in args else "")
+        oc("delete", kinds, "-l", sel, "--ignore-not-found", check=False)
+    elif cmd == "ps":
+        oc("get", "pods", "-l", sel, "-o", "wide", check=False)
+    elif cmd == "logs":
+        svcs = [a for a in args if not a.startswith("-")]
+        follow = ["-f"] if "-f" in args or "--follow" in args else []
+        if not svcs:
+            die("logs needs a SERVICE name")
+        for s in svcs:
+            oc("logs", *follow, f"deploy/{k8s_name(s)}", check=False)
+    elif cmd == "config":
+        print(yaml.safe_dump(cfg, sort_keys=False))
+    else:
+        die(f"'{cmd}' is not supported (use up, down, ps, logs)")
+
+
+NS = namespace()
+if __name__ == "__main__":
+    main()

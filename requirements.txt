@@ -9,5 +9,6 @@ ta
 requests
 httpx
 python-dotenv
+pyyaml            # used by ocp-compose
 pytest
 ruff

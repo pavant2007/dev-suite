@@ -181,8 +181,8 @@ COPY --from=cloud     /opt/google-cloud-sdk /opt/google-cloud-sdk
 COPY --from=cloud     /opt/aws-cli          /opt/aws-cli
 COPY                  agent-defaults/       /opt/agent-defaults/
 COPY --chmod=0755     entrypoint.sh         /usr/local/bin/entrypoint.sh
-# docker wrapper + ocp-build: `docker build` uses OpenShift Builds when no daemon is reachable
-COPY --chmod=0755     bin/docker bin/ocp-build /usr/local/bin/
+# docker wrapper: build/run/compose map onto OpenShift (ocp-build, oc run, ocp-compose) when no daemon is reachable
+COPY --chmod=0755     bin/docker bin/ocp-build bin/ocp-compose /usr/local/bin/
 
 # OpenShift runs containers with a random UID in group 0:
 # make HOME and /etc/passwd group-0 writable so any UID works.
